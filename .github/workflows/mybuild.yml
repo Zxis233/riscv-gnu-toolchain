@@ -1,10 +1,10 @@
-name: Build RISC-V GNU Toolchain
+name: Build RISC-V GNU Toolchain(Linux)
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  # push:
+  #   branches: [ main, master ]
+  # pull_request:
+  #   branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -53,7 +53,8 @@ jobs:
     
     - name: Configure toolchain
       run: |
-        ./configure --prefix=/opt/riscv --host=x86_64-w64-mingw32 --with-arch=rv32im_zicsr
+        # ./configure --prefix=/opt/riscv --host=x86_64-w64-mingw32 --with-arch=rv32im_zicsr
+        ./configure --prefix=/opt/riscv --with-arch=rv32im_zicsr
     
     - name: Build toolchain
       run: |
