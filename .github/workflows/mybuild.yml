@@ -54,7 +54,7 @@ jobs:
     - name: Configure toolchain
       run: |
         # ./configure --prefix=/opt/riscv --host=x86_64-w64-mingw32 --with-arch=rv32im_zicsr
-        ./configure --prefix=/opt/riscv --with-arch=rv32im_zicsr
+        ./configure --prefix=/opt/riscv --with-arch=rv32im
     
     - name: Build toolchain
       run: |
@@ -73,8 +73,8 @@ jobs:
     - name: Package toolchain
       run: |
         cd /opt
-        tar -czf riscv-gnu-toolchain-rv32im_zicsr-mingw32.tar.gz riscv/
-        ls -lh riscv-gnu-toolchain-rv32im_zicsr-mingw32.tar.gz
+        tar -czf riscv-gnu-toolchain-rv32im_linux.tar.gz riscv/
+        ls -lh riscv-gnu-toolchain-rv32im_linux.tar.gz
     
     - name: Upload toolchain artifact
       uses: actions/upload-artifact@v4
