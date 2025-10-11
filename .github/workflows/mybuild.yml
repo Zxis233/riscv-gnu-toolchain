@@ -34,9 +34,8 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v4
               with:
-                  repository: riscv-collab/riscv-gnu-toolchain
-                  submodules: recursive
-                  fetch-depth: 0
+                  repository: Zxis233/riscv-gnu-toolchain
+                  fetch-depth: 1
 
             - name: Install dependencies
               run: |
