@@ -1,0 +1,191 @@
+name: Build RISC-V Toolchain and Spike (Linux)
+
+on:
+    # push:
+    #   branches: [ main, master ]
+    # pull_request:
+    #   branches: [ main, master ]
+    workflow_dispatch:
+
+env:
+    TOOLCHAIN_FILENAME: riscv-gnu-toolchain-spike_linux
+    INSTALL_PREFIX: /opt/riscv
+
+jobs:
+    build-toolchain-and-spike:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout GNU Toolchain repository
+              uses: actions/checkout@v4
+              with:
+                  repository: Zxis233/riscv-gnu-toolchain
+                  path: riscv-gnu-toolchain
+                  fetch-depth: 1
+
+            - name: Install dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    autoconf \
+                    automake \
+                    autotools-dev \
+                    curl \
+                    python3 \
+                    python3-pip \
+                    python3-tomli \
+                    libmpc-dev \
+                    libmpfr-dev \
+                    libgmp-dev \
+                    gawk \
+                    build-essential \
+                    bison \
+                    flex \
+                    texinfo \
+                    gperf \
+                    libtool \
+                    patchutils \
+                    bc \
+                    zlib1g-dev \
+                    libexpat-dev \
+                    ninja-build \
+                    git \
+                    cmake \
+                    libglib2.0-dev \
+                    libslirp-dev \
+                    device-tree-compiler \
+                    libboost-regex-dev \
+                    libboost-system-dev
+
+            - name: Create installation directory
+              run: |
+                  sudo mkdir -p ${{ env.INSTALL_PREFIX }}
+                  sudo chown -R $USER:$USER ${{ env.INSTALL_PREFIX }}
+
+            - name: Configure GNU Toolchain
+              run: |
+                  cd riscv-gnu-toolchain
+                  ./configure --prefix=${{ env.INSTALL_PREFIX }} --enable-multilib
+
+            - name: Build GNU Toolchain
+              run: |
+                  cd riscv-gnu-toolchain
+                  make -j$(nproc)
+              timeout-minutes: 360
+
+            - name: Install GNU Toolchain
+              run: |
+                  cd riscv-gnu-toolchain
+                  make install
+
+            - name: Verify Toolchain installation
+              run: |
+                  export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
+                  riscv64-unknown-elf-gcc --version
+                  riscv64-unknown-linux-gnu-gcc --version || echo "Linux toolchain not built"
+
+            - name: Checkout Spike repository
+              uses: actions/checkout@v4
+              with:
+                  repository: riscv-software-src/riscv-isa-sim
+                  path: riscv-isa-sim
+                  fetch-depth: 1
+                  submodules: recursive
+
+            - name: Configure Spike
+              run: |
+                  cd riscv-isa-sim
+                  mkdir build
+                  cd build
+                  ../configure --prefix=${{ env.INSTALL_PREFIX }}
+
+            - name: Build Spike
+              run: |
+                  cd riscv-isa-sim/build
+                  make -j$(nproc)
+              timeout-minutes: 60
+
+            - name: Install Spike
+              run: |
+                  cd riscv-isa-sim/build
+                  make install
+
+            - name: Verify Spike installation
+              run: |
+                  ${{ env.INSTALL_PREFIX }}/bin/spike --help
+                  echo "Spike version:"
+                  ${{ env.INSTALL_PREFIX }}/bin/spike --version || true
+
+            - name: List installed binaries
+              run: |
+                  echo "=== Installed binaries ==="
+                  ls -lh ${{ env.INSTALL_PREFIX }}/bin/ | head -20
+                  echo "=== Total files ==="
+                  ls ${{ env.INSTALL_PREFIX }}/bin/ | wc -l
+
+            - name: Create backup directory and copy Spike files
+              run: |
+                  mkdir -p /tmp/spike_backup/bin
+                  mkdir -p /tmp/spike_backup/lib
+                  mkdir -p /tmp/spike_backup/include
+                  # 备份 Spike 相关文件
+                  cp ${{ env.INSTALL_PREFIX }}/bin/spike* /tmp/spike_backup/bin/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/lib/libspike* /tmp/spike_backup/lib/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/lib/libriscv* /tmp/spike_backup/lib/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/include/spike /tmp/spike_backup/include/ 2>/dev/null || true
+                  echo "=== Spike files backed up ==="
+                  find /tmp/spike_backup -type f
+
+            - name: Remove Spike files from installation
+              run: |
+                  # 从原安装目录中移除 Spike 文件
+                  rm -f ${{ env.INSTALL_PREFIX }}/bin/spike*
+                  rm -f ${{ env.INSTALL_PREFIX }}/lib/libspike*
+                  rm -f ${{ env.INSTALL_PREFIX }}/lib/libriscv*
+                  rm -rf ${{ env.INSTALL_PREFIX }}/include/spike
+
+            - name: Package GNU Toolchain only
+              run: |
+                  cd /opt
+                  tar -czf riscv-gnu-toolchain_linux.tar.gz riscv/
+                  ls -lh riscv-gnu-toolchain_linux.tar.gz
+
+            - name: Restore Spike files
+              run: |
+                  # 恢复 Spike 文件
+                  cp -r /tmp/spike_backup/bin/* ${{ env.INSTALL_PREFIX }}/bin/ 2>/dev/null || true
+                  cp -r /tmp/spike_backup/lib/* ${{ env.INSTALL_PREFIX }}/lib/ 2>/dev/null || true
+                  cp -r /tmp/spike_backup/include/* ${{ env.INSTALL_PREFIX }}/include/ 2>/dev/null || true
+
+            - name: Package Spike only
+              run: |
+                  cd /tmp
+                  tar -czf spike-riscv-simulator_linux.tar.gz spike_backup/
+                  mv spike-riscv-simulator_linux.tar.gz /opt/
+                  ls -lh /opt/spike-riscv-simulator_linux.tar.gz
+
+            - name: Upload GNU Toolchain artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: riscv-gnu-toolchain_linux
+                  path: /opt/riscv-gnu-toolchain_linux.tar.gz
+                  retention-days: 30
+
+            - name: Upload Spike artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: spike-riscv-simulator_linux
+                  path: /opt/spike-riscv-simulator_linux.tar.gz
+                  retention-days: 30
+
+            - name: Create Release (on tag)
+              if: startsWith(github.ref, 'refs/tags/')
+              uses: softprops/action-gh-release@v1
+              with:
+                  files: |
+                      /opt/riscv-gnu-toolchain_linux.tar.gz
+                      /opt/spike-riscv-simulator_linux.tar.gz
+                  draft: false
+                  prerelease: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
