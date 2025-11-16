@@ -16,6 +16,20 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
+            - name: Free up disk space
+              run: |
+                  echo "=== Before cleanup ==="
+                  df -h
+                  # 删除不需要的软件和文件
+                  sudo rm -rf /usr/share/dotnet
+                  sudo rm -rf /usr/local/lib/android
+                  sudo rm -rf /opt/ghc
+                  sudo rm -rf /opt/hostedtoolcache/CodeQL
+                  sudo docker image prune --all --force
+                  sudo apt-get clean
+                  echo "=== After cleanup ==="
+                  df -h
+
             - name: Checkout GNU Toolchain repository
               uses: actions/checkout@v4
               with:
@@ -65,7 +79,7 @@ jobs:
             - name: Configure GNU Toolchain
               run: |
                   cd riscv-gnu-toolchain
-                  ./configure --prefix=${{ env.INSTALL_PREFIX }} --enable-multilib
+                  ./configure --prefix=${{ env.INSTALL_PREFIX }} --with-arch=rv64gc --with-abi=lp64d
 
             - name: Build GNU Toolchain
               run: |
@@ -77,6 +91,19 @@ jobs:
               run: |
                   cd riscv-gnu-toolchain
                   make install
+
+            - name: Clean up toolchain build files
+              run: |
+                  echo "=== Disk usage before cleanup ==="
+                  df -h
+                  # 清理编译产生的中间文件
+                  cd riscv-gnu-toolchain
+                  make clean || true
+                  cd ..
+                  # 删除源代码目录以释放空间
+                  rm -rf riscv-gnu-toolchain
+                  echo "=== Disk usage after cleanup ==="
+                  df -h
 
             - name: Verify Toolchain installation
               run: |
@@ -109,6 +136,15 @@ jobs:
               run: |
                   cd riscv-isa-sim/build
                   make install
+
+            - name: Clean up Spike build files
+              run: |
+                  echo "=== Disk usage before Spike cleanup ==="
+                  df -h
+                  # 清理 Spike 编译文件
+                  rm -rf riscv-isa-sim
+                  echo "=== Disk usage after Spike cleanup ==="
+                  df -h
 
             - name: Verify Spike installation
               run: |
