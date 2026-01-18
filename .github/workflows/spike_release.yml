@@ -6,6 +6,14 @@ on:
     # pull_request:
     #   branches: [ main, master ]
     workflow_dispatch:
+        inputs:
+            toolchain_configure_args:
+                description: >-
+                    Extra arguments appended to "./configure --prefix=${INSTALL_PREFIX}" when building
+                    riscv-gnu-toolchain. Example (RV64 + multilib RV32, soft-float ABI):
+                    --enable-multilib --with-arch=rv64gc --with-abi=lp64 --with-multilib-generator="rv32imac-ilp32--;rv64gc-lp64--"
+                required: false
+                default: "--with-arch=rv64gc --with-abi=lp64d"
 
 env:
     TOOLCHAIN_FILENAME: riscv-gnu-toolchain-spike_linux
@@ -79,7 +87,8 @@ jobs:
             - name: Configure GNU Toolchain
               run: |
                   cd riscv-gnu-toolchain
-                  ./configure --prefix=${{ env.INSTALL_PREFIX }} --with-arch=rv64gc --with-abi=lp64d
+                  echo "Toolchain configure args: ${{ github.event.inputs.toolchain_configure_args }}"
+                  ./configure --prefix=${{ env.INSTALL_PREFIX }} ${{ github.event.inputs.toolchain_configure_args }}
 
             - name: Build GNU Toolchain
               run: |
@@ -301,8 +310,7 @@ jobs:
                   
                   ### 1. RISC-V GNU Toolchain
                   - **File:** \`riscv-gnu-toolchain_linux.tar.gz\`
-                  - **Architecture:** rv64gc
-                  - **ABI:** lp64d
+                  - **Configure Args:** \`${{ github.event.inputs.toolchain_configure_args }}\`
                   - **Includes:** gcc, g++, binutils, gdb, newlib
                   
                   ### 2. Spike ISA Simulator
@@ -340,7 +348,7 @@ jobs:
                   
                   - **Runner OS:** Ubuntu Latest
                   - **Build Workflow:** GitHub Actions
-                  - **Compiler Flags:** -march=rv64gc -mabi=lp64d
+                  - **Configure Args:** ${{ github.event.inputs.toolchain_configure_args }}
                   
                   ## ⚠️ Notes
                   
