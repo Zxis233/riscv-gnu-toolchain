@@ -10,8 +10,11 @@ on:
             toolchain_configure_args:
                 description: >-
                     Extra arguments appended to "./configure --prefix=${INSTALL_PREFIX}" when building
-                    riscv-gnu-toolchain. Example (RV64 + multilib RV32, soft-float ABI):
-                    --enable-multilib --with-arch=rv64gc --with-abi=lp64 --with-multilib-generator="rv32imac-ilp32--;rv64gc-lp64--"
+                    riscv-gnu-toolchain. Tip: if you need semicolons (e.g., --with-multilib-generator),
+                    do NOT add quotes; this workflow passes the input through an environment variable
+                    so semicolons are safe.
+                    Example (RV64 + multilib RV32, soft-float ABI):
+                    --enable-multilib --with-arch=rv64gc --with-abi=lp64 --with-multilib-generator=rv32imac-ilp32--;rv64gc-lp64--
                 required: false
                 default: "--with-arch=rv64gc --with-abi=lp64d"
 
@@ -85,10 +88,19 @@ jobs:
                   sudo chown -R $USER:$USER ${{ env.INSTALL_PREFIX }}
 
             - name: Configure GNU Toolchain
+              env:
+                  # Pass through the workflow_dispatch input as an environment variable to avoid
+                  # shell quoting issues (e.g., semicolons in --with-multilib-generator).
+                  TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
               run: |
                   cd riscv-gnu-toolchain
-                  echo "Toolchain configure args: ${{ github.event.inputs.toolchain_configure_args }}"
-                  ./configure --prefix=${{ env.INSTALL_PREFIX }} ${{ github.event.inputs.toolchain_configure_args }}
+
+                  echo "Toolchain configure args: ${TOOLCHAIN_CONFIGURE_ARGS}"
+
+                  # Avoid pathname expansion if the user passes characters like '*'.
+                  set -f
+
+                  ./configure --prefix="${{ env.INSTALL_PREFIX }}" ${TOOLCHAIN_CONFIGURE_ARGS}
 
             - name: Build GNU Toolchain
               run: |
@@ -310,7 +322,8 @@ jobs:
                   
                   ### 1. RISC-V GNU Toolchain
                   - **File:** \`riscv-gnu-toolchain_linux.tar.gz\`
-                  - **Configure Args:** \`${{ github.event.inputs.toolchain_configure_args }}\`
+                  - **Architecture:** rv64gc
+                  - **ABI:** lp64d
                   - **Includes:** gcc, g++, binutils, gdb, newlib
                   
                   ### 2. Spike ISA Simulator
@@ -348,7 +361,7 @@ jobs:
                   
                   - **Runner OS:** Ubuntu Latest
                   - **Build Workflow:** GitHub Actions
-                  - **Configure Args:** ${{ github.event.inputs.toolchain_configure_args }}
+                  - **Compiler Flags:** -march=rv64gc -mabi=lp64d
                   
                   ## ⚠️ Notes
                   
