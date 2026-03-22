@@ -303,12 +303,26 @@ jobs:
 
             - name: Generate release info
               id: release_info
+              env:
+                TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
               run: |
                   # 生成时间戳
                   RELEASE_DATE=$(date +'%Y-%m-%d')
                   RELEASE_TIME=$(date +'%H:%M:%S UTC')
                   RELEASE_TAG="build-$(date +'%Y%m%d-%H%M%S')"
                   RELEASE_TITLE="RISC-V Toolchain Build - ${RELEASE_DATE} ${RELEASE_TIME}"
+
+                  # 从 configure 参数中提取 arch/abi；若未提供则回退到 workflow 默认值
+                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
+                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
+                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
+                  fi
+
+                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | head -n1)
+                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | head -n1)
+
+                  if [ -z "${ARCH}" ]; then ARCH="unknown"; fi
+                  if [ -z "${ABI}" ]; then ABI="unknown"; fi
                   
                   # 生成 Release 说明
                   cat > /tmp/release_notes.md << EOF
@@ -322,8 +336,8 @@ jobs:
                   
                   ### 1. RISC-V GNU Toolchain
                   - **File:** \`riscv-gnu-toolchain_linux.tar.gz\`
-                  - **Architecture:** rv64gc
-                  - **ABI:** lp64d
+                  - **Architecture:** ${ARCH}
+                  - **ABI:** ${ABI}
                   - **Includes:** gcc, g++, binutils, gdb, newlib
                   
                   ### 2. Spike ISA Simulator
@@ -361,7 +375,7 @@ jobs:
                   
                   - **Runner OS:** Ubuntu Latest
                   - **Build Workflow:** GitHub Actions
-                  - **Compiler Flags:** -march=rv64gc -mabi=lp64d
+                  - **Compiler Flags:** -march=${ARCH} -mabi=${ABI}
                   
                   ## ⚠️ Notes
                   
