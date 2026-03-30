@@ -1,10 +1,6 @@
 name: Release RISC-V Toolchain and Spike (Linux)
 
 on:
-    # push:
-    #   branches: [ main, master ]
-    # pull_request:
-    #   branches: [ main, master ]
     workflow_dispatch:
         inputs:
             toolchain_configure_args:
@@ -87,6 +83,63 @@ jobs:
                   sudo mkdir -p ${{ env.INSTALL_PREFIX }}
                   sudo chown -R $USER:$USER ${{ env.INSTALL_PREFIX }}
 
+            - name: Resolve toolchain target settings
+              env:
+                  TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
+              run: |
+                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
+                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
+                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
+                  fi
+
+                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | head -n1)
+                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | head -n1)
+
+                  if [ -z "${ARCH}" ]; then ARCH="unknown"; fi
+                  if [ -z "${ABI}" ]; then ABI="unknown"; fi
+
+                  case "${ARCH}" in
+                      rv32*)
+                          XLEN=32
+                          ;;
+                      rv64*)
+                          XLEN=64
+                          ;;
+                      *)
+                          case "${ABI}" in
+                              ilp32*)
+                                  XLEN=32
+                                  ;;
+                              lp64*)
+                                  XLEN=64
+                                  ;;
+                              *)
+                                  echo "Unable to infer target XLEN from configure args: ${TOOLCHAIN_ARGS}" >&2
+                                  exit 1
+                                  ;;
+                          esac
+                          ;;
+                  esac
+
+                  ELF_TRIPLE="riscv${XLEN}-unknown-elf"
+                  LINUX_TRIPLE="riscv${XLEN}-unknown-linux-gnu"
+                  PK_INSTALL_DIR="${{ env.INSTALL_PREFIX }}/${ELF_TRIPLE}"
+
+                  echo "RISCV_ARCH=${ARCH}" >> "$GITHUB_ENV"
+                  echo "RISCV_ABI=${ABI}" >> "$GITHUB_ENV"
+                  echo "RISCV_XLEN=${XLEN}" >> "$GITHUB_ENV"
+                  echo "RISCV_ELF_TRIPLE=${ELF_TRIPLE}" >> "$GITHUB_ENV"
+                  echo "RISCV_LINUX_TRIPLE=${LINUX_TRIPLE}" >> "$GITHUB_ENV"
+                  echo "RISCV_PK_INSTALL_DIR=${PK_INSTALL_DIR}" >> "$GITHUB_ENV"
+
+                  echo "Resolved toolchain settings:"
+                  echo "  arch=${ARCH}"
+                  echo "  abi=${ABI}"
+                  echo "  xlen=${XLEN}"
+                  echo "  elf triple=${ELF_TRIPLE}"
+                  echo "  linux triple=${LINUX_TRIPLE}"
+                  echo "  pk install dir=${PK_INSTALL_DIR}"
+
             - name: Configure GNU Toolchain
               env:
                   # Pass through the workflow_dispatch input as an environment variable to avoid
@@ -95,12 +148,17 @@ jobs:
               run: |
                   cd riscv-gnu-toolchain
 
-                  echo "Toolchain configure args: ${TOOLCHAIN_CONFIGURE_ARGS}"
+                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
+                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
+                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
+                  fi
+
+                  echo "Toolchain configure args: ${TOOLCHAIN_ARGS}"
 
                   # Avoid pathname expansion if the user passes characters like '*'.
                   set -f
 
-                  ./configure --prefix="${{ env.INSTALL_PREFIX }}" ${TOOLCHAIN_CONFIGURE_ARGS}
+                  ./configure --prefix="${{ env.INSTALL_PREFIX }}" ${TOOLCHAIN_ARGS}
 
             - name: Build GNU Toolchain
               run: |
@@ -129,8 +187,8 @@ jobs:
             - name: Verify Toolchain installation
               run: |
                   export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
-                  riscv64-unknown-elf-gcc --version
-                  riscv64-unknown-linux-gnu-gcc --version || echo "Linux toolchain not built"
+                  ${RISCV_ELF_TRIPLE}-gcc --version
+                  ${RISCV_LINUX_TRIPLE}-gcc --version || echo "Linux toolchain not built"
 
             - name: Checkout pk (Proxy Kernel) repository
               uses: actions/checkout@v4
@@ -145,7 +203,7 @@ jobs:
                   mkdir build
                   cd build
                   export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
-                  ../configure --prefix=${{ env.INSTALL_PREFIX }} --host=riscv64-unknown-elf
+                  ../configure --prefix=${{ env.INSTALL_PREFIX }} --host=${RISCV_ELF_TRIPLE}
 
             - name: Build pk
               run: |
@@ -170,8 +228,8 @@ jobs:
 
             - name: Verify pk installation
               run: |
-                  ls -lh ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/pk
-                  file ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/pk
+                  ls -lh ${RISCV_PK_INSTALL_DIR}/bin/pk
+                  file ${RISCV_PK_INSTALL_DIR}/bin/pk
 
             - name: Checkout Spike repository
               uses: actions/checkout@v4
@@ -226,15 +284,15 @@ jobs:
                   mkdir -p /tmp/spike/bin
                   mkdir -p /tmp/spike/lib
                   mkdir -p /tmp/spike/include
-                  mkdir -p /tmp/pk_backup/riscv64-unknown-elf/bin
+                  mkdir -p /tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin
                   # 备份 Spike 相关文件
                   cp ${{ env.INSTALL_PREFIX }}/bin/spike* /tmp/spike/bin/ 2>/dev/null || true
                   cp -r ${{ env.INSTALL_PREFIX }}/lib/libspike* /tmp/spike/lib/ 2>/dev/null || true
                   cp -r ${{ env.INSTALL_PREFIX }}/lib/libriscv* /tmp/spike/lib/ 2>/dev/null || true
                   cp -r ${{ env.INSTALL_PREFIX }}/include/spike /tmp/spike/include/ 2>/dev/null || true
                   # 备份 pk 相关文件
-                  cp ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/pk /tmp/pk_backup/riscv64-unknown-elf/bin/ 2>/dev/null || true
-                  cp ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/bbl /tmp/pk_backup/riscv64-unknown-elf/bin/ 2>/dev/null || true
+                  cp ${RISCV_PK_INSTALL_DIR}/bin/pk /tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin/ 2>/dev/null || true
+                  cp ${RISCV_PK_INSTALL_DIR}/bin/bbl /tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin/ 2>/dev/null || true
                   echo "=== Spike files backed up ==="
                   find /tmp/spike -type f
                   echo "=== pk files backed up ==="
@@ -248,8 +306,8 @@ jobs:
                   rm -f ${{ env.INSTALL_PREFIX }}/lib/libriscv*
                   rm -rf ${{ env.INSTALL_PREFIX }}/include/spike
                   # 移除 pk 文件
-                  rm -f ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/pk
-                  rm -f ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/bin/bbl
+                  rm -f ${RISCV_PK_INSTALL_DIR}/bin/pk
+                  rm -f ${RISCV_PK_INSTALL_DIR}/bin/bbl
 
             - name: Package GNU Toolchain only
               run: |
@@ -264,7 +322,7 @@ jobs:
                   cp -r /tmp/spike/lib/* ${{ env.INSTALL_PREFIX }}/lib/ 2>/dev/null || true
                   cp -r /tmp/spike/include/* ${{ env.INSTALL_PREFIX }}/include/ 2>/dev/null || true
                   # 恢复 pk 文件
-                  cp -r /tmp/pk_backup/riscv64-unknown-elf/* ${{ env.INSTALL_PREFIX }}/riscv64-unknown-elf/ 2>/dev/null || true
+                  cp -r /tmp/pk_backup/${RISCV_ELF_TRIPLE}/* ${RISCV_PK_INSTALL_DIR}/ 2>/dev/null || true
 
             - name: Package Spike only
               run: |
@@ -303,8 +361,6 @@ jobs:
 
             - name: Generate release info
               id: release_info
-              env:
-                TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
               run: |
                   # 生成时间戳
                   RELEASE_DATE=$(date +'%Y-%m-%d')
@@ -312,17 +368,9 @@ jobs:
                   RELEASE_TAG="build-$(date +'%Y%m%d-%H%M%S')"
                   RELEASE_TITLE="RISC-V Toolchain Build - ${RELEASE_DATE} ${RELEASE_TIME}"
 
-                  # 从 configure 参数中提取 arch/abi；若未提供则回退到 workflow 默认值
-                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
-                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
-                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
-                  fi
-
-                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | head -n1)
-                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | head -n1)
-
-                  if [ -z "${ARCH}" ]; then ARCH="unknown"; fi
-                  if [ -z "${ABI}" ]; then ABI="unknown"; fi
+                  ARCH="${RISCV_ARCH:-unknown}"
+                  ABI="${RISCV_ABI:-unknown}"
+                  ELF_TRIPLE="${RISCV_ELF_TRIPLE:-riscv64-unknown-elf}"
                   
                   # 生成 Release 说明
                   cat > /tmp/release_notes.md << EOF
@@ -358,15 +406,16 @@ jobs:
                   # 2. Extract Spike (optional)
                   tar -xzf spike-riscv-simulator_linux.tar.gz
                   cp -r spike/* /opt/riscv/
-                  
+                   
                   # 3. Extract pk (optional)
                   tar -xzf riscv-pk_linux.tar.gz
-                  cp -r pk_backup/riscv64-unknown-elf/* /opt/riscv/riscv64-unknown-elf/
-                  
+                  cp -r pk_backup/${ELF_TRIPLE}/* /opt/riscv/${ELF_TRIPLE}/
+                  export PATH=/opt/riscv/${ELF_TRIPLE}/bin:\$PATH
+                   
                   # 4. Test installation
-                  riscv64-unknown-elf-gcc --version
+                  ${ELF_TRIPLE}-gcc --version
                   spike --help
-                  
+                   
                   # 5. Run a simple program
                   spike pk your_program
                   \`\`\`
