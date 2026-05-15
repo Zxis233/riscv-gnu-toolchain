@@ -40,7 +40,7 @@ jobs:
                   cat /etc/os-release
                   echo "=== glibc ==="
                   getconf GNU_LIBC_VERSION
-                  ldd --version | head -n 1
+                  ldd --version 2>&1 | awk 'NR == 1 { print }'
                   echo "=== disk ==="
                   df -h
 
@@ -98,10 +98,10 @@ jobs:
                   dnf clean all
 
                   echo "=== versions ==="
-                  gcc --version | head -n 1
-                  g++ --version | head -n 1
+                  gcc --version 2>&1 | awk 'NR == 1 { print }'
+                  g++ --version 2>&1 | awk 'NR == 1 { print }'
                   git --version
-                  cmake --version | head -n 1
+                  cmake --version 2>&1 | awk 'NR == 1 { print }'
                   getconf GNU_LIBC_VERSION
 
             - name: Checkout GNU Toolchain repository
@@ -124,8 +124,8 @@ jobs:
                       TOOLCHAIN_ARGS="--with-arch=rv32imac --with-abi=ilp32"
                   fi
 
-                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | head -n1)
-                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | head -n1)
+                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | awk 'NR == 1 { print }')
+                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | awk 'NR == 1 { print }')
 
                   if [ -z "${ARCH}" ]; then ARCH="unknown"; fi
                   if [ -z "${ABI}" ]; then ABI="unknown"; fi
@@ -352,7 +352,7 @@ jobs:
             - name: List installed binaries
               run: |
                   echo "=== Installed binaries ==="
-                  ls -lh ${{ env.INSTALL_PREFIX }}/bin/ | head -20
+                  ls -lh ${{ env.INSTALL_PREFIX }}/bin/ | awk 'NR <= 20 { print }'
                   echo "=== Total files ==="
                   ls ${{ env.INSTALL_PREFIX }}/bin/ | wc -l
 
