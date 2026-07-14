@@ -1,0 +1,530 @@
+name: Release RISC-V Toolchain and Spike (Linux glibc 2.28)
+
+on:
+    workflow_dispatch:
+        inputs:
+            toolchain_configure_args:
+                description: >-
+                    Extra arguments appended to "./configure --prefix=${INSTALL_PREFIX}" when building
+                    riscv-gnu-toolchain. Tip: if you need semicolons (e.g., --with-multilib-generator),
+                    do NOT add quotes; this workflow passes the input through an environment variable
+                    so semicolons are safe.
+                    Example RV32 bare-metal:
+                    --with-arch=rv32imac --with-abi=ilp32
+                    Example RV64 + multilib RV32, soft-float ABI:
+                    --enable-multilib --with-arch=rv64gc --with-abi=lp64d --with-multilib-generator=rv32imac-ilp32--;rv64gc-lp64d--
+                required: false
+                default: "--with-arch=rv32imac --with-abi=ilp32"
+
+env:
+    TOOLCHAIN_FILENAME: riscv-gnu-toolchain-spike_linux_glibc228
+    INSTALL_PREFIX: /opt/riscv
+
+jobs:
+    build-toolchain-and-spike:
+        runs-on: ubuntu-latest
+
+        # Build inside Rocky Linux 8 so host-side binaries depend on glibc 2.28,
+        # instead of the newer glibc from ubuntu-latest.
+        container:
+            image: rockylinux/rockylinux:8
+            options: --user root
+
+        defaults:
+            run:
+                shell: bash
+
+        steps:
+            - name: Show Rocky Linux 8 build environment
+              run: |
+                  cat /etc/os-release
+                  echo "=== glibc ==="
+                  getconf GNU_LIBC_VERSION
+                  ldd --version 2>&1 | awk 'NR == 1 { print }'
+                  echo "=== disk ==="
+                  df -h
+
+            - name: Install dependencies
+              run: |
+                  dnf -y update
+                  dnf -y install dnf-plugins-core epel-release
+                  dnf config-manager --set-enabled powertools || true
+
+                  dnf -y install \
+                    autoconf \
+                    automake \
+                    curl \
+                    python3 \
+                    python3-pip \
+                    gmp-devel \
+                    mpfr-devel \
+                    libmpc-devel \
+                    gawk \
+                    gcc \
+                    gcc-c++ \
+                    make \
+                    bison \
+                    flex \
+                    texinfo \
+                    gperf \
+                    libtool \
+                    patchutils \
+                    bc \
+                    zlib-devel \
+                    expat-devel \
+                    ninja-build \
+                    git \
+                    cmake \
+                    glib2-devel \
+                    libslirp-devel \
+                    dtc \
+                    boost-devel \
+                    file \
+                    findutils \
+                    diffutils \
+                    tar \
+                    gzip \
+                    xz \
+                    bzip2 \
+                    which \
+                    hostname \
+                    perl \
+                    procps-ng \
+                    binutils
+
+                  python3 -m pip install --upgrade pip
+                  python3 -m pip install tomli
+
+                  dnf clean all
+
+                  echo "=== versions ==="
+                  gcc --version 2>&1 | awk 'NR == 1 { print }'
+                  g++ --version 2>&1 | awk 'NR == 1 { print }'
+                  git --version
+                  cmake --version 2>&1 | awk 'NR == 1 { print }'
+                  getconf GNU_LIBC_VERSION
+
+            - name: Checkout GNU Toolchain repository
+              uses: actions/checkout@v4
+              with:
+                  repository: Zxis233/riscv-gnu-toolchain
+                  path: riscv-gnu-toolchain
+                  fetch-depth: 1
+
+            - name: Create installation directory
+              run: |
+                  mkdir -p "${{ env.INSTALL_PREFIX }}"
+
+            - name: Resolve toolchain target settings
+              env:
+                  TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
+              run: |
+                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
+                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
+                      TOOLCHAIN_ARGS="--with-arch=rv32imac --with-abi=ilp32"
+                  fi
+
+                  ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | awk 'NR == 1 { print }')
+                  ABI=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-abi=\([^[:space:]]*\).*/\1/p' | awk 'NR == 1 { print }')
+
+                  if [ -z "${ARCH}" ]; then ARCH="unknown"; fi
+                  if [ -z "${ABI}" ]; then ABI="unknown"; fi
+
+                  case "${ARCH}" in
+                      rv32*)
+                          XLEN=32
+                          ;;
+                      rv64*)
+                          XLEN=64
+                          ;;
+                      *)
+                          case "${ABI}" in
+                              ilp32*)
+                                  XLEN=32
+                                  ;;
+                              lp64*)
+                                  XLEN=64
+                                  ;;
+                              *)
+                                  echo "Unable to infer target XLEN from configure args: ${TOOLCHAIN_ARGS}" >&2
+                                  exit 1
+                                  ;;
+                          esac
+                          ;;
+                  esac
+
+                  ELF_TRIPLE="riscv${XLEN}-unknown-elf"
+                  LINUX_TRIPLE="riscv${XLEN}-unknown-linux-gnu"
+                  PK_INSTALL_DIR="${{ env.INSTALL_PREFIX }}/${ELF_TRIPLE}"
+
+                  echo "RISCV_ARCH=${ARCH}" >> "$GITHUB_ENV"
+                  echo "RISCV_ABI=${ABI}" >> "$GITHUB_ENV"
+                  echo "RISCV_XLEN=${XLEN}" >> "$GITHUB_ENV"
+                  echo "RISCV_ELF_TRIPLE=${ELF_TRIPLE}" >> "$GITHUB_ENV"
+                  echo "RISCV_LINUX_TRIPLE=${LINUX_TRIPLE}" >> "$GITHUB_ENV"
+                  echo "RISCV_PK_INSTALL_DIR=${PK_INSTALL_DIR}" >> "$GITHUB_ENV"
+
+                  echo "Resolved toolchain settings:"
+                  echo "  arch=${ARCH}"
+                  echo "  abi=${ABI}"
+                  echo "  xlen=${XLEN}"
+                  echo "  elf triple=${ELF_TRIPLE}"
+                  echo "  linux triple=${LINUX_TRIPLE}"
+                  echo "  pk install dir=${PK_INSTALL_DIR}"
+
+            - name: Configure GNU Toolchain
+              env:
+                  TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
+              run: |
+                  cd riscv-gnu-toolchain
+
+                  TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
+                  if [ -z "${TOOLCHAIN_ARGS}" ]; then
+                      TOOLCHAIN_ARGS="--with-arch=rv32imac --with-abi=ilp32"
+                  fi
+
+                  echo "Toolchain configure args: ${TOOLCHAIN_ARGS}"
+
+                  # Avoid pathname expansion if the user passes characters like '*'.
+                  set -f
+
+                  ./configure --prefix="${{ env.INSTALL_PREFIX }}" ${TOOLCHAIN_ARGS}
+
+            - name: Build GNU Toolchain
+              run: |
+                  cd riscv-gnu-toolchain
+                  make -j"$(nproc)"
+              timeout-minutes: 360
+
+            - name: Install GNU Toolchain
+              run: |
+                  cd riscv-gnu-toolchain
+                  make install
+
+            - name: Clean up toolchain build files
+              run: |
+                  echo "=== Disk usage before cleanup ==="
+                  df -h
+                  cd riscv-gnu-toolchain
+                  make clean || true
+                  cd ..
+                  rm -rf riscv-gnu-toolchain
+                  echo "=== Disk usage after cleanup ==="
+                  df -h
+
+            - name: Verify Toolchain installation
+              run: |
+                  export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
+                  "${RISCV_ELF_TRIPLE}-gcc" --version
+                  "${RISCV_LINUX_TRIPLE}-gcc" --version || echo "Linux toolchain not built"
+                  "${RISCV_ELF_TRIPLE}-gcc" -print-multi-lib || true
+                  file "${{ env.INSTALL_PREFIX }}/bin/${RISCV_ELF_TRIPLE}-gcc"
+                  ldd "${{ env.INSTALL_PREFIX }}/bin/${RISCV_ELF_TRIPLE}-gcc" || true
+
+            - name: Check required glibc versions of host binaries
+              run: |
+                  echo "Build container glibc:"
+                  getconf GNU_LIBC_VERSION
+
+                  echo "Required GLIBC symbol versions found in installed host binaries:"
+                  required_versions_file=/tmp/required-glibc-versions.txt
+                  : > "${required_versions_file}"
+
+                  while IFS= read -r f; do
+                      if file "$f" | grep -q 'ELF .*x86-64'; then
+                          objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' >> "${required_versions_file}" || true
+                      fi
+                  done < <(find "${{ env.INSTALL_PREFIX }}" -type f -perm /111)
+
+                  sort -V "${required_versions_file}" | uniq | tee /tmp/required-glibc-versions-sorted.txt
+
+                  echo "Highest required GLIBC version:"
+                  tail -n 1 /tmp/required-glibc-versions-sorted.txt
+
+                  if grep -E 'GLIBC_2\.(29|3[0-9]|[4-9][0-9])' /tmp/required-glibc-versions-sorted.txt; then
+                      echo "ERROR: Found GLIBC requirement newer than 2.28." >&2
+                      exit 1
+                  fi
+
+            - name: Checkout pk (Proxy Kernel) repository
+              uses: actions/checkout@v4
+              with:
+                  repository: riscv-software-src/riscv-pk
+                  path: riscv-pk
+                  fetch-depth: 1
+
+            - name: Configure pk
+              run: |
+                  cd riscv-pk
+                  mkdir build
+                  cd build
+                  export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
+                  ../configure --prefix=${{ env.INSTALL_PREFIX }} --host="${RISCV_ELF_TRIPLE}"
+
+            - name: Build pk
+              run: |
+                  cd riscv-pk/build
+                  export PATH=${{ env.INSTALL_PREFIX }}/bin:$PATH
+                  make -j"$(nproc)"
+              timeout-minutes: 30
+
+            - name: Install pk
+              run: |
+                  cd riscv-pk/build
+                  make install
+
+            - name: Clean up pk build files
+              run: |
+                  echo "=== Disk usage before pk cleanup ==="
+                  df -h
+                  rm -rf riscv-pk
+                  echo "=== Disk usage after pk cleanup ==="
+                  df -h
+
+            - name: Verify pk installation
+              run: |
+                  ls -lh "${RISCV_PK_INSTALL_DIR}/bin/pk"
+                  file "${RISCV_PK_INSTALL_DIR}/bin/pk"
+
+            - name: Checkout Spike repository
+              uses: actions/checkout@v4
+              with:
+                  repository: riscv-software-src/riscv-isa-sim
+                  path: riscv-isa-sim
+                  fetch-depth: 1
+                  submodules: recursive
+
+            - name: Configure Spike
+              run: |
+                  cd riscv-isa-sim
+                  mkdir build
+                  cd build
+                  ../configure --prefix=${{ env.INSTALL_PREFIX }}
+
+            - name: Build Spike
+              run: |
+                  cd riscv-isa-sim/build
+                  make -j"$(nproc)"
+              timeout-minutes: 60
+
+            - name: Install Spike
+              run: |
+                  cd riscv-isa-sim/build
+                  make install
+
+            - name: Clean up Spike build files
+              run: |
+                  echo "=== Disk usage before Spike cleanup ==="
+                  df -h
+                  rm -rf riscv-isa-sim
+                  echo "=== Disk usage after Spike cleanup ==="
+                  df -h
+
+            - name: Verify Spike installation
+              run: |
+                  "${{ env.INSTALL_PREFIX }}/bin/spike" --help
+                  echo "Spike version:"
+                  "${{ env.INSTALL_PREFIX }}/bin/spike" --version || true
+                  file "${{ env.INSTALL_PREFIX }}/bin/spike"
+                  ldd "${{ env.INSTALL_PREFIX }}/bin/spike" || true
+
+            - name: Check required glibc versions again after Spike
+              run: |
+                  required_versions_file=/tmp/required-glibc-versions-final.txt
+                  : > "${required_versions_file}"
+
+                  while IFS= read -r f; do
+                      if file "$f" | grep -q 'ELF .*x86-64'; then
+                          objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' >> "${required_versions_file}" || true
+                      fi
+                  done < <(find "${{ env.INSTALL_PREFIX }}" -type f -perm /111)
+
+                  sort -V "${required_versions_file}" | uniq | tee /tmp/required-glibc-versions-final-sorted.txt
+
+                  echo "Highest required GLIBC version:"
+                  tail -n 1 /tmp/required-glibc-versions-final-sorted.txt
+
+                  if grep -E 'GLIBC_2\.(29|3[0-9]|[4-9][0-9])' /tmp/required-glibc-versions-final-sorted.txt; then
+                      echo "ERROR: Found GLIBC requirement newer than 2.28." >&2
+                      exit 1
+                  fi
+
+            - name: List installed binaries
+              run: |
+                  echo "=== Installed binaries ==="
+                  ls -lh ${{ env.INSTALL_PREFIX }}/bin/ | awk 'NR <= 20 { print }'
+                  echo "=== Total files ==="
+                  ls ${{ env.INSTALL_PREFIX }}/bin/ | wc -l
+
+            - name: Create backup directory and copy Spike files
+              run: |
+                  mkdir -p /tmp/spike/bin
+                  mkdir -p /tmp/spike/lib
+                  mkdir -p /tmp/spike/include
+                  mkdir -p "/tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin"
+
+                  cp ${{ env.INSTALL_PREFIX }}/bin/spike* /tmp/spike/bin/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/lib/libspike* /tmp/spike/lib/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/lib/libriscv* /tmp/spike/lib/ 2>/dev/null || true
+                  cp -r ${{ env.INSTALL_PREFIX }}/include/spike /tmp/spike/include/ 2>/dev/null || true
+
+                  cp "${RISCV_PK_INSTALL_DIR}/bin/pk" "/tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin/" 2>/dev/null || true
+                  cp "${RISCV_PK_INSTALL_DIR}/bin/bbl" "/tmp/pk_backup/${RISCV_ELF_TRIPLE}/bin/" 2>/dev/null || true
+
+                  echo "=== Spike files backed up ==="
+                  find /tmp/spike -type f
+                  echo "=== pk files backed up ==="
+                  find /tmp/pk_backup -type f
+
+            - name: Remove Spike files from installation
+              run: |
+                  rm -f ${{ env.INSTALL_PREFIX }}/bin/spike*
+                  rm -f ${{ env.INSTALL_PREFIX }}/lib/libspike*
+                  rm -f ${{ env.INSTALL_PREFIX }}/lib/libriscv*
+                  rm -rf ${{ env.INSTALL_PREFIX }}/include/spike
+
+                  rm -f "${RISCV_PK_INSTALL_DIR}/bin/pk"
+                  rm -f "${RISCV_PK_INSTALL_DIR}/bin/bbl"
+
+            - name: Package GNU Toolchain only
+              run: |
+                  cd /opt
+                  tar -czf riscv-gnu-toolchain_linux_glibc228.tar.gz riscv/
+                  ls -lh riscv-gnu-toolchain_linux_glibc228.tar.gz
+
+            - name: Restore Spike files
+              run: |
+                  cp -r /tmp/spike/bin/* ${{ env.INSTALL_PREFIX }}/bin/ 2>/dev/null || true
+                  cp -r /tmp/spike/lib/* ${{ env.INSTALL_PREFIX }}/lib/ 2>/dev/null || true
+                  cp -r /tmp/spike/include/* ${{ env.INSTALL_PREFIX }}/include/ 2>/dev/null || true
+
+                  cp -r "/tmp/pk_backup/${RISCV_ELF_TRIPLE}"/* "${RISCV_PK_INSTALL_DIR}/" 2>/dev/null || true
+
+            - name: Package Spike only
+              run: |
+                  cd /tmp
+                  tar -czf spike-riscv-simulator_linux_glibc228.tar.gz spike/
+                  mv spike-riscv-simulator_linux_glibc228.tar.gz /opt/
+                  ls -lh /opt/spike-riscv-simulator_linux_glibc228.tar.gz
+
+            - name: Package pk only
+              run: |
+                  cd /tmp
+                  tar -czf riscv-pk_linux_glibc228.tar.gz pk_backup/
+                  mv riscv-pk_linux_glibc228.tar.gz /opt/
+                  ls -lh /opt/riscv-pk_linux_glibc228.tar.gz
+
+            - name: Upload GNU Toolchain artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: riscv-gnu-toolchain_linux_glibc228
+                  path: /opt/riscv-gnu-toolchain_linux_glibc228.tar.gz
+                  retention-days: 30
+
+            - name: Upload Spike artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: spike-riscv-simulator_linux_glibc228
+                  path: /opt/spike-riscv-simulator_linux_glibc228.tar.gz
+                  retention-days: 30
+
+            - name: Upload pk artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: riscv-pk_linux_glibc228
+                  path: /opt/riscv-pk_linux_glibc228.tar.gz
+                  retention-days: 30
+
+            - name: Generate release info
+              id: release_info
+              run: |
+                  RELEASE_DATE=$(date +'%Y-%m-%d')
+                  RELEASE_TIME=$(date +'%H:%M:%S UTC')
+                  RELEASE_TAG="glibc228-build-$(date +'%Y%m%d-%H%M%S')"
+                  RELEASE_TITLE="RISC-V Toolchain Build glibc 2.28 - ${RELEASE_DATE} ${RELEASE_TIME}"
+
+                  ARCH="${RISCV_ARCH:-unknown}"
+                  ABI="${RISCV_ABI:-unknown}"
+                  ELF_TRIPLE="${RISCV_ELF_TRIPLE:-riscv32-unknown-elf}"
+                  BUILD_GLIBC="$(getconf GNU_LIBC_VERSION)"
+
+                  cat > /tmp/release_notes.md << EOF
+                  # RISC-V Development Tools for old Linux systems
+
+                  **Build Date:** ${RELEASE_DATE}
+                  **Build Time:** ${RELEASE_TIME}
+                  **Build Status:** Success
+
+                  ## Compatibility target
+
+                  - **Build OS:** Rocky Linux 8 container
+                  - **Build glibc:** ${BUILD_GLIBC}
+                  - **Host architecture:** x86_64 Linux
+                  - **Target architecture:** ${ARCH}
+                  - **Target ABI:** ${ABI}
+
+                  This release is intended for Rocky Linux 8 / RHEL 8 compatible systems
+                  whose system glibc is 2.28.
+
+                  ## Included Components
+
+                  ### 1. RISC-V GNU Toolchain
+                  - **File:** \`riscv-gnu-toolchain_linux_glibc228.tar.gz\`
+                  - **Architecture:** ${ARCH}
+                  - **ABI:** ${ABI}
+                  - **Includes:** gcc, g++, binutils, gdb, newlib
+
+                  ### 2. Spike ISA Simulator
+                  - **File:** \`spike-riscv-simulator_linux_glibc228.tar.gz\`
+                  - **Description:** RISC-V ISA Simulator
+
+                  ### 3. Proxy Kernel (pk)
+                  - **File:** \`riscv-pk_linux_glibc228.tar.gz\`
+                  - **Description:** Lightweight proxy kernel for Spike
+
+                  ## Quick Start
+
+                  \`\`\`bash
+                  tar -xzf riscv-gnu-toolchain_linux_glibc228.tar.gz -C /opt/
+                  export PATH=/opt/riscv/bin:\$PATH
+
+                  tar -xzf spike-riscv-simulator_linux_glibc228.tar.gz
+                  cp -r spike/* /opt/riscv/
+
+                  tar -xzf riscv-pk_linux_glibc228.tar.gz
+                  cp -r pk_backup/${ELF_TRIPLE}/* /opt/riscv/${ELF_TRIPLE}/
+                  export PATH=/opt/riscv/${ELF_TRIPLE}/bin:\$PATH
+
+                  ${ELF_TRIPLE}-gcc --version
+                  ${ELF_TRIPLE}-gcc -print-multi-lib
+                  spike --help
+                  \`\`\`
+
+                  ## Notes
+
+                  - Built in Rocky Linux 8 to avoid GLIBC_2.29+ requirements.
+                  - Do not rebuild this release on ubuntu-latest if you need Rocky Linux 8 compatibility.
+                  EOF
+
+                  echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+                  echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+                  echo "release_date=${RELEASE_DATE}" >> "$GITHUB_OUTPUT"
+                  echo "release_time=${RELEASE_TIME}" >> "$GITHUB_OUTPUT"
+
+                  cat /tmp/release_notes.md
+
+            - name: Create Automatic Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ steps.release_info.outputs.release_tag }}
+                  name: ${{ steps.release_info.outputs.release_title }}
+                  body_path: /tmp/release_notes.md
+                  files: |
+                      /opt/riscv-gnu-toolchain_linux_glibc228.tar.gz
+                      /opt/spike-riscv-simulator_linux_glibc228.tar.gz
+                      /opt/riscv-pk_linux_glibc228.tar.gz
+                  draft: false
+                  prerelease: false
+                  make_latest: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
