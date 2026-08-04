@@ -202,6 +202,111 @@ jobs:
                   echo "  linux triple=${LINUX_TRIPLE}"
                   echo "  pk install dir=${PK_INSTALL_DIR}"
 
+            - name: Fetch required GNU Toolchain submodules reliably
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd riscv-gnu-toolchain
+
+                  # Synchronize the original submodule metadata first. URL overrides
+                  # must be applied afterwards, otherwise "git submodule sync" would
+                  # restore the Sourceware URLs from .gitmodules.
+                  git submodule sync --recursive
+
+                  # Binutils and GDB are hosted in the same Sourceware repository.
+                  # Use Google's read-only mirror to avoid Sourceware HTTP 429 errors.
+                  git submodule set-url \
+                      binutils \
+                      https://gnu.googlesource.com/binutils-gdb
+
+                  git submodule set-url \
+                      gdb \
+                      https://gnu.googlesource.com/binutils-gdb
+
+                  echo "Configured submodule URLs:"
+                  git config --get-regexp '^submodule\.(binutils|gdb|newlib)\.url$' || true
+
+                  fetch_submodule() {
+                      local path="$1"
+                      local attempt
+                      local max_attempts=5
+                      local delay=20
+
+                      for attempt in $(seq 1 "${max_attempts}"); do
+                          echo "::group::Fetching ${path}, attempt ${attempt}/${max_attempts}"
+
+                          if git \
+                              -c protocol.version=2 \
+                              -c submodule.fetchJobs=1 \
+                              submodule update \
+                              --init \
+                              --force \
+                              --jobs 1 \
+                              --no-recommend-shallow \
+                              --filter=blob:none \
+                              -- "${path}"; then
+                              echo "::endgroup::"
+                              echo "Successfully fetched ${path}"
+                              return 0
+                          fi
+
+                          echo "::endgroup::"
+                          echo "Fetch of ${path} failed."
+
+                          # Remove any incomplete checkout before retrying.
+                          git submodule deinit -f -- "${path}" || true
+                          rm -rf "${path}"
+                          rm -rf ".git/modules/${path}"
+
+                          if [ "${attempt}" -eq "${max_attempts}" ]; then
+                              echo "Failed to fetch ${path} after ${max_attempts} attempts." >&2
+                              return 1
+                          fi
+
+                          echo "Retrying ${path} in ${delay} seconds..."
+                          sleep "${delay}"
+                          delay=$((delay * 2))
+                      done
+                  }
+
+                  # The default bare-metal/Newlib build requires these submodules.
+                  # GCC itself is supplied separately through --with-gcc-src.
+                  fetch_submodule binutils
+                  fetch_submodule newlib
+                  fetch_submodule gdb
+
+                  echo "Final submodule state:"
+                  git submodule status -- binutils newlib gdb
+
+                  # Fail early before the long build if a source tree is incomplete.
+                  test -x binutils/configure
+                  test -x newlib/configure
+                  test -x gdb/configure
+
+                  echo "Required toolchain submodules are ready."
+
+            - name: Diagnose toolchain source revisions
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd riscv-gnu-toolchain
+
+                  echo "Superproject:"
+                  git rev-parse HEAD
+
+                  for module in binutils newlib gdb; do
+                      echo
+                      echo "=== ${module} ==="
+                      echo "Expected:"
+                      git rev-parse "HEAD:${module}"
+
+                      echo "Checked out:"
+                      git -C "${module}" rev-parse HEAD
+
+                      echo "Remote:"
+                      git -C "${module}" remote -v
+                  done
+
             - name: Configure GNU Toolchain
               env:
                   # Pass through the workflow_dispatch input as an environment variable to avoid
@@ -437,17 +542,17 @@ jobs:
                   ELF_TRIPLE="${RISCV_ELF_TRIPLE:-riscv64-unknown-elf}"
                   GCC_BRANCH="${GCC_CFI_BRANCH:-unknown}"
                   GCC_COMMIT="${GCC_CFI_COMMIT:-unknown}"
-                  
+
                   # 生成 Release 说明
                   cat > /tmp/release_notes.md << EOF
                   # RISC-V Development Tools
-                  
+
                   **Build Date:** ${RELEASE_DATE}  
                   **Build Time:** ${RELEASE_TIME}  
                   **Build Status:** ✅ Success
-                  
+
                   ## 📦 Included Components
-                  
+
                   ### 1. RISC-V GNU Toolchain
                   - **File:** \`riscv-gnu-toolchain_linux.tar.gz\`
                   - **Architecture:** ${ARCH}
@@ -455,22 +560,22 @@ jobs:
                   - **GCC CFI Branch:** \`${GCC_BRANCH}\`
                   - **GCC CFI Commit:** \`${GCC_COMMIT}\`
                   - **Includes:** gcc, g++, binutils, gdb, newlib
-                  
+
                   ### 2. Spike ISA Simulator
                   - **File:** \`spike-riscv-simulator_linux.tar.gz\`
                   - **Description:** RISC-V ISA Simulator
-                  
+
                   ### 3. Proxy Kernel (pk)
                   - **File:** \`riscv-pk_linux.tar.gz\`
                   - **Description:** Lightweight proxy kernel for Spike
-                  
+
                   ## 🚀 Quick Start
-                  
+
                   \`\`\`bash
                   # 1. Extract toolchain
                   tar -xzf riscv-gnu-toolchain_linux.tar.gz -C /opt/
                   export PATH=/opt/riscv/bin:\$PATH
-                  
+
                   # 2. Extract Spike (optional)
                   tar -xzf spike-riscv-simulator_linux.tar.gz
                   cp -r spike/* /opt/riscv/
@@ -487,30 +592,30 @@ jobs:
                   # 5. Run a simple program
                   spike pk your_program
                   \`\`\`
-                  
+
                   ## 📝 Version Information
-                  
+
                   - **Runner OS:** Ubuntu Latest
                   - **Build Workflow:** GitHub Actions
                   - **Compiler Flags:** -march=${ARCH} -mabi=${ABI}
-                  
+
                   ## ⚠️ Notes
-                  
+
                   - All binaries are built for x86_64 Linux
                   - Tested on Ubuntu 22.04+
                   - Total size: ~2-3 GB (all components)
-                  
+
                   ---
-                  
+
                   Built with ❤️ by GitHub Actions
                   EOF
-                  
+
                   # 输出变量
                   echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
                   echo "release_title=${RELEASE_TITLE}" >> $GITHUB_OUTPUT
                   echo "release_date=${RELEASE_DATE}" >> $GITHUB_OUTPUT
                   echo "release_time=${RELEASE_TIME}" >> $GITHUB_OUTPUT
-                  
+
                   cat /tmp/release_notes.md
 
             - name: Create Automatic Release
