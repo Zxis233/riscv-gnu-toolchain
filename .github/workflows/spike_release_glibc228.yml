@@ -9,12 +9,10 @@ on:
                     riscv-gnu-toolchain. Tip: if you need semicolons (e.g., --with-multilib-generator),
                     do NOT add quotes; this workflow passes the input through an environment variable
                     so semicolons are safe.
-                    Example RV32 bare-metal:
-                    --with-arch=rv32imac --with-abi=ilp32
-                    Example RV64 + multilib RV32, soft-float ABI:
-                    --enable-multilib --with-arch=rv64gc --with-abi=lp64d --with-multilib-generator=rv32imac-ilp32--;rv64gc-lp64d--
+                    Example (RV64 + multilib RV32, soft-float ABI):
+                    --enable-multilib --with-arch=rv64gc --with-abi=lp64 --with-multilib-generator=rv32imac-ilp32--;rv64gc-lp64--
                 required: false
-                default: "--with-arch=rv32imac --with-abi=ilp32"
+                default: "--with-arch=rv64gc --with-abi=lp64d"
             gcc_cfi_branch:
                 description: Branch to clone from Zxis233/gcc-cfi
                 required: true
@@ -38,27 +36,85 @@ on:
 env:
     TOOLCHAIN_FILENAME: riscv-gnu-toolchain-spike_linux_glibc228
     INSTALL_PREFIX: /opt/riscv
+    BUILD_IMAGE: rockylinux/rockylinux:8.10
+    BUILD_CONTAINER: riscv-rocky810-build
+    SPIKE_HOST_TOOLSET: gcc-toolset-13
+    SPIKE_BOOST_VERSION: "1.83.0"
+    SPIKE_BOOST_SHA256: "6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e"
+    SPIKE_BOOST_PREFIX: /opt/spike-boost
 
 jobs:
     build-toolchain-and-spike:
         runs-on: ubuntu-latest
 
-        # Build inside Rocky Linux 8 so host-side binaries depend on glibc 2.28,
-        # instead of the newer glibc from ubuntu-latest.
-        container:
-            image: rockylinux/rockylinux:8
-            options: --user root
-
+        # Clean the Ubuntu host before starting the Rocky Linux 8.10 container.
+        # All subsequent run steps default to Bash inside that container so
+        # host-side binaries are built against Rocky's glibc 2.28.
         defaults:
             run:
-                shell: bash
+                shell: rocky-bash {0}
 
         steps:
-            - name: Show Rocky Linux 8 build environment
+            - name: Free up disk space
+              shell: bash
+              run: |
+                  echo "=== Before cleanup ==="
+                  df -h
+                  # 删除不需要的软件和文件
+                  sudo rm -rf /usr/share/dotnet
+                  sudo rm -rf /usr/local/lib/android
+                  sudo rm -rf /opt/ghc
+                  sudo rm -rf /opt/hostedtoolcache/CodeQL
+                  sudo docker image prune --all --force
+                  sudo apt-get clean
+                  echo "=== After cleanup ==="
+                  df -h
+
+            - name: Start Rocky Linux 8.10 build container
+              shell: bash
+              run: |
+                  # Share workspace, runner command files, and package locations
+                  # with host-side checkout, artifact, and release actions.
+                  docker run --detach \
+                      --name "${BUILD_CONTAINER}" \
+                      --user root \
+                      --volume "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+                      --volume "${RUNNER_TEMP}:${RUNNER_TEMP}" \
+                      --volume /opt:/opt \
+                      --volume /tmp:/tmp \
+                      --workdir "${GITHUB_WORKSPACE}" \
+                      "${BUILD_IMAGE}" sleep infinity
+
+                  cat > "${RUNNER_TEMP}/rocky-bash" <<'EOF'
+                  #!/usr/bin/env bash
+                  set -euo pipefail
+
+                  # Forward current step inputs and command-file paths on every
+                  # invocation, while keeping Rocky's own PATH and HOME.
+                  container_env=()
+                  while IFS= read -r name; do
+                      case "${name}" in
+                          GITHUB_*|RUNNER_TEMP|RUNNER_WORKSPACE|RISCV_*|GCC_CFI_*|TOOLCHAIN_*|SPIKE_*|INSTALL_PREFIX|CI)
+                              container_env+=(--env "${name}")
+                              ;;
+                      esac
+                  done < <(compgen -e)
+
+                  exec docker exec \
+                      "${container_env[@]}" \
+                      --workdir "${PWD}" \
+                      "${BUILD_CONTAINER}" \
+                      bash --noprofile --norc -eo pipefail "$@"
+                  EOF
+                  chmod +x "${RUNNER_TEMP}/rocky-bash"
+                  echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+            - name: Show Rocky Linux 8.10 build environment
               run: |
                   cat /etc/os-release
                   echo "=== glibc ==="
                   getconf GNU_LIBC_VERSION
+                  test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
                   ldd --version 2>&1 | awk 'NR == 1 { print }'
                   echo "=== disk ==="
                   df -h
@@ -97,7 +153,6 @@ jobs:
                     glib2-devel \
                     libslirp-devel \
                     dtc \
-                    boost-devel \
                     file \
                     findutils \
                     diffutils \
@@ -114,6 +169,12 @@ jobs:
                   python3 -m pip install --upgrade pip
                   python3 -m pip install tomli
 
+                  # Checkout actions run as the Ubuntu user; builds run as root
+                  # in Rocky, so trust the specific shared source directories.
+                  for repo in riscv-gnu-toolchain gcc-cfi riscv-pk riscv-isa-sim; do
+                      git config --global --add safe.directory "${GITHUB_WORKSPACE}/${repo}"
+                  done
+
                   dnf clean all
 
                   echo "=== versions ==="
@@ -122,6 +183,65 @@ jobs:
                   git --version
                   cmake --version 2>&1 | awk 'NR == 1 { print }'
                   getconf GNU_LIBC_VERSION
+
+            - name: Install Spike host toolchain
+              run: |
+                  # EL8's GCC Toolset supplies the C++20 headers required by
+                  # Spike while retaining the Rocky Linux 8 glibc baseline.
+                  dnf -y install \
+                      "${SPIKE_HOST_TOOLSET}-gcc" \
+                      "${SPIKE_HOST_TOOLSET}-gcc-c++" \
+                      "${SPIKE_HOST_TOOLSET}-binutils"
+                  dnf clean all
+
+                  source "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
+                  echo "=== Spike host toolchain ==="
+                  command -v gcc g++
+                  gcc --version 2>&1 | awk 'NR == 1 { print }'
+                  g++ --version 2>&1 | awk 'NR == 1 { print }'
+                  test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+
+            - name: Build Spike Boost dependencies
+              run: |
+                  source "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
+
+                  # Rocky 8's Boost 1.66 headers use allocator members removed
+                  # in C++20. Build a matching modern header/library pair.
+                  boost_suffix="${SPIKE_BOOST_VERSION//./_}"
+                  boost_archive="boost_${boost_suffix}.tar.bz2"
+                  boost_build_dir=$(mktemp -d "${RUNNER_TEMP}/spike-boost.XXXXXX")
+                  trap 'rm -rf "${boost_build_dir}"' EXIT
+
+                  curl --fail --location --retry 5 --retry-delay 10 \
+                      "https://archives.boost.io/release/${SPIKE_BOOST_VERSION}/source/${boost_archive}" \
+                      --output "${boost_build_dir}/${boost_archive}"
+                  printf '%s  %s\n' "${SPIKE_BOOST_SHA256}" "${boost_build_dir}/${boost_archive}" | sha256sum --check
+                  tar -xjf "${boost_build_dir}/${boost_archive}" -C "${boost_build_dir}"
+                  cd "${boost_build_dir}/boost_${boost_suffix}"
+
+                  ./bootstrap.sh --with-toolset=gcc --with-libraries=regex,system \
+                      --without-icu --prefix="${SPIKE_BOOST_PREFIX}" \
+                      --libdir="${SPIKE_BOOST_PREFIX}/lib"
+                  printf 'using gcc : : "%s" ;\n' \
+                      "/opt/rh/${SPIKE_HOST_TOOLSET}/root/usr/bin/g++" > user-config.jam
+                  # PIC is needed when these archives are linked into libriscv.
+                  # Keep Boost static and its C/C++ runtime dynamically linked.
+                  ./b2 -j"$(nproc)" --user-config="${PWD}/user-config.jam" \
+                      --with-regex --with-system --disable-icu --layout=system \
+                      toolset=gcc variant=release threading=multi cxxstd=20 \
+                      link=static runtime-link=shared cxxflags=-fPIC \
+                      --prefix="${SPIKE_BOOST_PREFIX}" \
+                      --libdir="${SPIKE_BOOST_PREFIX}/lib" install
+
+                  test -s "${SPIKE_BOOST_PREFIX}/include/boost/version.hpp"
+                  test -s "${SPIKE_BOOST_PREFIX}/lib/libboost_regex.a"
+                  test -s "${SPIKE_BOOST_PREFIX}/lib/libboost_system.a"
+                  if find "${SPIKE_BOOST_PREFIX}/lib" -name 'libboost_*.so*' -print -quit | grep -q .; then
+                      echo "ERROR: Spike's Boost prefix must contain only static Boost libraries." >&2
+                      exit 1
+                  fi
+                  grep -E '^#define BOOST_(VERSION|LIB_VERSION) ' "${SPIKE_BOOST_PREFIX}/include/boost/version.hpp"
+              timeout-minutes: 30
 
             - name: Checkout GNU Toolchain repository
               uses: actions/checkout@v4
@@ -183,7 +303,7 @@ jobs:
               run: |
                   TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
                   if [ -z "${TOOLCHAIN_ARGS}" ]; then
-                      TOOLCHAIN_ARGS="--with-arch=rv32imac --with-abi=ilp32"
+                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
                   fi
 
                   ARCH=$(printf '%s\n' "${TOOLCHAIN_ARGS}" | sed -n 's/.*--with-arch=\([^[:space:]]*\).*/\1/p' | awk 'NR == 1 { print }')
@@ -234,6 +354,115 @@ jobs:
                   echo "  linux triple=${LINUX_TRIPLE}"
                   echo "  pk install dir=${PK_INSTALL_DIR}"
 
+            - name: Fetch required GNU Toolchain submodules reliably
+              run: |
+                  set -euo pipefail
+                  cd riscv-gnu-toolchain
+
+                  # Synchronize the original submodule metadata first. URL overrides
+                  # must be applied afterwards, otherwise "git submodule sync" would
+                  # restore the Sourceware URLs from .gitmodules.
+                  git submodule sync --recursive
+
+                  # Binutils and GDB are hosted in the same Sourceware repository.
+                  # Use Google's read-only mirror to avoid Sourceware HTTP 429 errors.
+                  git submodule set-url \
+                      binutils \
+                      https://gnu.googlesource.com/binutils-gdb
+
+                  git submodule set-url \
+                      gdb \
+                      https://gnu.googlesource.com/binutils-gdb
+
+                  echo "Configured submodule URLs:"
+                  git config --get-regexp '^submodule\.(binutils|gdb|newlib)\.url$' || true
+
+                  fetch_submodule() {
+                      local path="$1"
+                      local attempt
+                      local max_attempts=5
+                      local delay=20
+
+                      for attempt in $(seq 1 "${max_attempts}"); do
+                          echo "::group::Fetching ${path}, attempt ${attempt}/${max_attempts}"
+
+                          if git \
+                              -c protocol.version=2 \
+                              -c submodule.fetchJobs=1 \
+                              submodule update \
+                              --init \
+                              --force \
+                              --jobs 1 \
+                              --no-recommend-shallow \
+                              --filter=blob:none \
+                              -- "${path}"; then
+                              echo "::endgroup::"
+                              echo "Successfully fetched ${path}"
+                              return 0
+                          fi
+
+                          echo "::endgroup::"
+                          echo "Fetch of ${path} failed."
+
+                          # Remove any incomplete checkout before retrying.
+                          git submodule deinit -f -- "${path}" || true
+                          rm -rf "${path}"
+                          rm -rf ".git/modules/${path}"
+
+                          if [ "${attempt}" -eq "${max_attempts}" ]; then
+                              echo "Failed to fetch ${path} after ${max_attempts} attempts." >&2
+                              return 1
+                          fi
+
+                          echo "Retrying ${path} in ${delay} seconds..."
+                          sleep "${delay}"
+                          delay=$((delay * 2))
+                      done
+                  }
+
+                  # The default bare-metal/Newlib build requires these submodules.
+                  # GCC itself is supplied separately through --with-gcc-src.
+                  fetch_submodule binutils
+                  fetch_submodule newlib
+                  fetch_submodule gdb
+
+                  # Checkout can create submodule directories as the host user.
+                  # Trust each initialized repository before entering it as root;
+                  # safe.directory for the parent does not cover its submodules.
+                  git submodule foreach --recursive \
+                      'git config --global --add safe.directory "$PWD"'
+
+                  echo "Final submodule state:"
+                  git submodule status -- binutils newlib gdb
+
+                  # Fail early before the long build if a source tree is incomplete.
+                  test -x binutils/configure
+                  test -x newlib/configure
+                  test -x gdb/configure
+
+                  echo "Required toolchain submodules are ready."
+
+            - name: Diagnose toolchain source revisions
+              run: |
+                  set -euo pipefail
+                  cd riscv-gnu-toolchain
+
+                  echo "Superproject:"
+                  git rev-parse HEAD
+
+                  for module in binutils newlib gdb; do
+                      echo
+                      echo "=== ${module} ==="
+                      echo "Expected:"
+                      git rev-parse "HEAD:${module}"
+
+                      echo "Checked out:"
+                      git -C "${module}" rev-parse HEAD
+
+                      echo "Remote:"
+                      git -C "${module}" remote -v
+                  done
+
             - name: Configure GNU Toolchain
               env:
                   TOOLCHAIN_CONFIGURE_ARGS: ${{ github.event.inputs.toolchain_configure_args }}
@@ -242,7 +471,7 @@ jobs:
 
                   TOOLCHAIN_ARGS="${TOOLCHAIN_CONFIGURE_ARGS:-}"
                   if [ -z "${TOOLCHAIN_ARGS}" ]; then
-                      TOOLCHAIN_ARGS="--with-arch=rv32imac --with-abi=ilp32"
+                      TOOLCHAIN_ARGS="--with-arch=rv64gc --with-abi=lp64d"
                   fi
 
                   echo "Toolchain configure args: ${TOOLCHAIN_ARGS}"
@@ -357,21 +586,44 @@ jobs:
                   fetch-depth: 1
                   submodules: recursive
 
+            - name: Trust Spike submodule directories
+              run: |
+                  git -C riscv-isa-sim submodule foreach --recursive \
+                      'git config --global --add safe.directory "$PWD"'
+
             - name: Configure Spike
               run: |
+                  # Each docker exec starts a fresh shell; enable the toolset
+                  # separately for configure, build, and install.
+                  source "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
+                  export CC="/opt/rh/${SPIKE_HOST_TOOLSET}/root/usr/bin/gcc"
+                  export CXX="/opt/rh/${SPIKE_HOST_TOOLSET}/root/usr/bin/g++"
                   cd riscv-isa-sim
                   mkdir build
                   cd build
-                  ../configure --prefix=${{ env.INSTALL_PREFIX }}
+                  ../configure --prefix="${{ env.INSTALL_PREFIX }}" \
+                      --with-boost="${SPIKE_BOOST_PREFIX}" \
+                      --with-boost-libdir="${SPIKE_BOOST_PREFIX}/lib" \
+                      --with-boost-asio=boost_system \
+                      --with-boost-regex=boost_regex
+
+                  # Fail here if detection falls back to old headers or silently
+                  # disables the Boost-backed socket interface.
+                  grep -F -- "${SPIKE_BOOST_PREFIX}/include" Makefile
+                  grep -F -- "${SPIKE_BOOST_PREFIX}/lib" Makefile
+                  grep -E '^#define HAVE_BOOST_ASIO([[:space:]]|$)' config.h
+                  grep -E '^#define HAVE_BOOST_REGEX([[:space:]]|$)' config.h
 
             - name: Build Spike
               run: |
+                  source "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
                   cd riscv-isa-sim/build
                   make -j"$(nproc)"
               timeout-minutes: 60
 
             - name: Install Spike
               run: |
+                  source "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
                   cd riscv-isa-sim/build
                   make install
 
@@ -477,6 +729,44 @@ jobs:
                   mv riscv-pk_linux_glibc228.tar.gz /opt/
                   ls -lh /opt/riscv-pk_linux_glibc228.tar.gz
 
+            - name: Verify packaged Spike without GCC Toolset
+              shell: bash
+              run: |
+                  # Only mount the archive: the clean runtime container must
+                  # not inherit /opt/rh or libraries from the build container.
+                  docker run --rm --interactive \
+                      --user root \
+                      --env INSTALL_PREFIX \
+                      --env SPIKE_HOST_TOOLSET \
+                      --env SPIKE_BOOST_PREFIX \
+                      --volume /opt/spike-riscv-simulator_linux_glibc228.tar.gz:/tmp/spike.tar.gz:ro \
+                      "${BUILD_IMAGE}" bash --noprofile --norc -eo pipefail <<'EOF'
+                  # The fresh image does not inherit the build container's
+                  # enabled repositories; Rocky 8 provides dtc in PowerTools.
+                  dnf --enablerepo=powertools -y install libstdc++ libgcc dtc tar gzip
+                  command -v dtc
+                  dtc --version
+                  dnf clean all
+                  test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+                  test ! -e "/opt/rh/${SPIKE_HOST_TOOLSET}/enable"
+                  test ! -e "${SPIKE_BOOST_PREFIX}"
+
+                  mkdir -p "${INSTALL_PREFIX}"
+                  tar -xzf /tmp/spike.tar.gz -C /tmp
+                  cp -a /tmp/spike/. "${INSTALL_PREFIX}/"
+
+                  echo "=== Spike runtime dependencies on Rocky Linux 8.10 ==="
+                  ldd "${INSTALL_PREFIX}/bin/spike" | tee /tmp/spike-runtime-dependencies.txt
+                  if grep -E 'not found|/opt/rh/|libboost_' /tmp/spike-runtime-dependencies.txt; then
+                      echo "ERROR: Spike requires missing libraries, GCC Toolset, or shared Boost at runtime." >&2
+                      exit 1
+                  fi
+
+                  # Resolve lazy-bound symbols as well, including C++ ABI
+                  # symbols, before accepting the packaged executable.
+                  LD_BIND_NOW=1 "${INSTALL_PREFIX}/bin/spike" --help
+                  EOF
+
             - name: Upload GNU Toolchain artifact
               uses: actions/upload-artifact@v4
               with:
@@ -509,7 +799,7 @@ jobs:
 
                   ARCH="${RISCV_ARCH:-unknown}"
                   ABI="${RISCV_ABI:-unknown}"
-                  ELF_TRIPLE="${RISCV_ELF_TRIPLE:-riscv32-unknown-elf}"
+                  ELF_TRIPLE="${RISCV_ELF_TRIPLE:-riscv64-unknown-elf}"
                   BUILD_GLIBC="$(getconf GNU_LIBC_VERSION)"
                   GCC_BRANCH="${GCC_CFI_BRANCH:-unknown}"
                   GCC_COMMIT="${GCC_CFI_COMMIT:-unknown}"
@@ -523,7 +813,7 @@ jobs:
 
                   ## Compatibility target
 
-                  - **Build OS:** Rocky Linux 8 container
+                  - **Build OS:** Rocky Linux 8.10 container
                   - **Build glibc:** ${BUILD_GLIBC}
                   - **Host architecture:** x86_64 Linux
                   - **Target architecture:** ${ARCH}
@@ -545,6 +835,9 @@ jobs:
                   ### 2. Spike ISA Simulator
                   - **File:** \`spike-riscv-simulator_linux_glibc228.tar.gz\`
                   - **Description:** RISC-V ISA Simulator
+                  - **Host C/C++ Toolset:** \`${SPIKE_HOST_TOOLSET}\`
+                  - **Boost:** \`${SPIKE_BOOST_VERSION}\` (Regex/System statically linked)
+                  - **Runtime check:** Starts in Rocky Linux 8.10 without GCC Toolset
 
                   ### 3. Proxy Kernel (pk)
                   - **File:** \`riscv-pk_linux_glibc228.tar.gz\`
@@ -570,7 +863,7 @@ jobs:
 
                   ## Notes
 
-                  - Built in Rocky Linux 8 to avoid GLIBC_2.29+ requirements.
+                  - Built in Rocky Linux 8.10 to avoid GLIBC_2.29+ requirements.
                   - Do not rebuild this release on ubuntu-latest if you need Rocky Linux 8 compatibility.
                   EOF
 
@@ -597,3 +890,8 @@ jobs:
                   make_latest: false
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Stop Rocky Linux build container
+              if: ${{ always() }}
+              shell: bash
+              run: docker rm --force "${BUILD_CONTAINER}" || true
